@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data'
 B, K, L, A = 840., 2000., 10., .2   # pN um², pN/um², um, um
+DB, DETA, E_ATP = 280., 1., .100   # stiffness SD, relative viscosity uncertainty, pN um/ATP (100 zJ)
 FREQ = {'WT': 68.68953759, 'ODA': 29.49269462}
 COL = {'WT': '#1744dd', 'ODA': '#e51c23'}
 plt.rcParams.update({'font.family': 'DejaVu Serif', 'font.size': 12, 'axes.labelsize': 12,
@@ -118,13 +119,16 @@ def heat(ax, d, vmin=-20, vmax=20):
     return im
 
 
+def parameter_bound(d, g, b=B, eta_scale=1., pct=95):
+    # Fixed waveform; H scales with viscosity. Recompute the region-of-trust.
+    p = b*d['d2'] - eta_scale*d['hydro']
+    good = (p*d['dt']<0) & (p*d['gamma']<0)
+    return np.percentile(abs(p[good])/(A*(17500/L/8)*(.429 if g=='ODA' else 1)), pct)
+
+
 def sweep(g):
-    d = load(g); bs = np.geomspace(50, 2000, 90); ans = []
-    for b in bs:
-        p = b*d['d2']-d['hydro']; good = (p*d['dt']<0)&(p*d['gamma']<0)
-        f = abs((-p/(A*(17500/L/8)*(.429 if g=='ODA' else 1)))[good])
-        ans.append(np.percentile(f, [95, 98]))
-    return bs, np.asarray(ans)
+    d = load(g); bs = np.geomspace(50, 2000, 90)
+    return bs, np.array([parameter_bound(d,g,b,pct=[95,98]) for b in bs])
 
 
 def fig2(wt):
@@ -183,16 +187,18 @@ def atp(d, g):
     """ATP-equivalent minimum from all positive motor work (thesis Eqs. 10.36–10.38)."""
     motor = -d['passive'] + d['slide']  # b=0; includes bending, sliding elasticity, hydrodynamics
     power = np.nan_to_num(np.maximum(motor*d['dt'], 0))
-    local = power.mean(axis=0)/d['f0'] / ((17500/L)*(.429 if g=='ODA' else 1)*.083)
+    local = power.mean(axis=0)/d['f0'] / ((17500/L)*(.429 if g=='ODA' else 1)*E_ATP)
     return local, np.trapz(local, dx=d['ds'])/L
 
 
+@plt.rc_context({'font.size': 13, 'axes.labelsize': 13, 'xtick.labelsize': 11, 'ytick.labelsize': 11})
 def fig4(data, ind):
-    fig=plt.figure(figsize=(15.3,4.5)); gs=fig.add_gridspec(2,4,width_ratios=[.55,1.05,.9,1.55],hspace=.23,wspace=.55,
+    fig=plt.figure(figsize=(15.3,4.5)); gs=fig.add_gridspec(2,4,width_ratios=[.55,1.05,.9,1.55],hspace=.26,wspace=.45,
                                              left=.055,right=.98,top=.87,bottom=.19)
-    ax=fig.add_subplot(gs[:,0]); tag(ax,'A');ax.plot([0,1],[1,0],'k')
-    ax.set(xlim=(0,1.3),ylim=(0,1.2),xlabel='$v$',ylabel='$F$',xticks=[],yticks=[])
-    ax.text(.03,1.03,r'$F_0$');ax.text(1.01,.04,r'$v_0$');ax.spines[['top','right']].set_visible(False)
+    ax=fig.add_subplot(gs[:,0]); tag(ax,'A'); ax.plot([0,1],[1,0],'k')
+    ax.set(xlim=(0,1.3),ylim=(0,1.2),xlabel='$v$',ylabel='$F$',
+           xticks=[0,1],xticklabels=['0',r'$v_0$'],yticks=[1],yticklabels=[r'$F_0$'])
+    ax.set_box_aspect(1); ax.set_anchor('N'); ax.spines[['top','right']].set_visible(False)
     axc=fig.add_subplot(gs[:,2]);tag(axc,'C')
     for i,g in enumerate(('WT','ODA')):
         ax=fig.add_subplot(gs[i,1]);v,f,F0,slope,v0=velocity(data[g]); vr=np.linspace(0,35,200)
@@ -216,9 +222,12 @@ def fig4(data, ind):
         inset.plot(i+np.linspace(-.13,.13,len(vals)),vals,'.',c=COL[g],ms=3.5,alpha=.55)
         inset.plot(i,total,'*',c=COL[g],ms=10)
     axd.axhline(1,c='.5',lw=.8,ls=':'); axd.set(xlim=(0,1),xlabel='$s/L$',ylabel='ATP equivalents / head / beat')
-    axd.legend(frameon=False,loc='upper left',fontsize=11)
+    axd.legend(frameon=False,loc='upper left',fontsize=12)
     inset.set(xlim=(-.4,1.4),xticks=[0,1],xticklabels=['WT','ODA'],ylabel='ATP / head / beat')
-    inset.tick_params(labelsize=8); inset.yaxis.label.set_size(9)
+    inset.tick_params(labelsize=9); inset.yaxis.label.set_size(10)
+    for panel in fig.axes:
+        for label in panel.texts:
+            if label.get_text() in ('A','B','C','D'): label.set_fontsize(16)
     save('Fig4',fig)
 
 
@@ -319,12 +328,17 @@ def main():
            'trust: (B*gamma_ss-H)*gamma_t < 0 and (B*gamma_ss-H)*gamma < 0.',
            'B=840 pN um², K=2000 pN/um², a=0.2 um, L=10 um.',
            'Reporting absolute force percentiles within region-of-trust.',
-           'Fig4D: all positive work from m_m=-B*gamma_ss+K*a²*gamma+H (b=0), divided by N*0.083 pN um/ATP;',
+           f'Fig4D: all positive work from m_m=-B*gamma_ss+K*a²*gamma+H (b=0), divided by N*{E_ATP:.3f} pN um/ATP (100 zJ);',
+           'Uncertainty: vary B by ±280 pN um² and viscosity by ±100% separately, holding waveform fixed and recomputing trust.',
+           'These are parameter sensitivities, not confidence intervals. Relative sensitivity to a and rho is -1 at fixed H.',
            'ATP-equivalent energetic LOWER bound (100% efficiency), not measured ATP consumption.',
            'Fig4D follows thesis Sec. 10.4 (positive-work domain, b=0); no region-of-trust restriction.','']
     for g in FREQ:
         f=d[g]; gind=np.array([bound(x) for x in ind[g]]); v,ff,F0,sl,v0=velocity(f)
         hydro=np.nanmean(abs(f['hydro'])/(abs(f['bend']-f['slide'])+abs(f['hydro'])+1e-12))
+        nominal=bound(f)
+        bvals=np.array([parameter_bound(f,g,b=B+x*DB) for x in (-1,1)])
+        evals=np.array([parameter_bound(f,g,eta_scale=x) for x in np.linspace(1-DETA,1+DETA,201)])
         basal=[]
         for alpha in (0,.5,1):
             gam=f['gamma']-alpha*f['gamma'].mean(axis=1,keepdims=True)
@@ -333,6 +347,8 @@ def main():
         stiffness,forces=sweep(g); k=np.argmin(abs(forces[:,0]-5))
         lines += [f'{g}: {len(gind)} axonemes, mean beat frequency {f["f0"]:.2f} Hz',
                   f'  group: trust {f["trust"].sum()}/{f["trust"].size} ({100*f["trust"].mean():.2f}%), 95% {bound(f):.3f} pN, 98% {bound(f,98):.3f} pN',
+                  f'  B={B-DB:.0f}/{B+DB:.0f}: 95th percentile {bvals[0]:.3f}/{bvals[1]:.3f} pN; relative changes {(bvals[0]/nominal-1)*100:+.1f}%/{(bvals[1]/nominal-1)*100:+.1f}%',
+                  f'  eta/eta0=0..2 (±100%, 201 samples): 95th percentile range {evals.min():.3f}–{evals.max():.3f} pN; max absolute relative change {100*max(abs(evals/nominal-1)):.2f}%',
                   f'  ATP-equivalent lower bound (all positive motor work): {atp(f,g)[1]:.3f} per head/beat; spatial peak {atp(f,g)[0].max():.3f}',
                   f'  dynamic-only (FigS5): 95% {bound(dyn[g]):.3f} pN',
                   f'  idealized (FigS6 uses WT): 95% {bound(ideal[g]):.3f} pN',
